@@ -17,22 +17,26 @@ label.btn{display:inline-block;cursor:pointer}
 input,select{font-size:15px;padding:9px;border-radius:8px;border:1px solid #a8754a;background:#1b120c;color:#f3e9d8;width:100%;box-sizing:border-box;font-family:inherit}
 #text{margin-top:8px;background:#f3e9d8;color:#2a1b11;border-radius:8px;padding:10px;line-height:1.55;max-height:22vh;overflow:auto;font-size:15px}
 .cur{background:#ffd36b}
-#chapters{display:none;margin-top:6px}#chapters button{display:block;width:100%;margin-top:4px;text-align:left}
+#chapters{margin-top:6px;max-height:20vh;overflow:auto}#chapters button{display:block;width:100%;margin-top:4px;text-align:left}
 details summary{cursor:pointer;color:#d9c3a0;font-size:14px;margin-top:8px}
 </style></head><body>
 <canvas id="scene"></canvas>
 <div id="top"><h1>📚 Read Aloud Library</h1><label class="btn" id="pick" for="file">Open PDF<input type="file" id="file" accept="application/pdf,.pdf"></label></div>
-<div id="status">Open a PDF, add chapters, then tap a book on the shelf.</div>
+<div id="status">Open a PDF, then tap a book on the shelf.</div>
 <div id="panel">
  <h2 id="now">No book open</h2>
  <div class="row"><button class="btn alt" id="prev">◀</button><button class="btn" id="play">▶ Play</button><button class="btn alt" id="pause">❚❚</button><button class="btn alt" id="stop">■</button><button class="btn alt" id="next">▶▶</button></div>
- <div class="row"><select id="voice"></select><select id="rate"><option value="0.8">0.8x</option><option value="1" selected>1x</option><option value="1.2">1.2x</option><option value="1.5">1.5x</option></select></div>
+ <div id="pstat" style="font-size:13px;color:#d9c3a0;margin-top:6px">Open a PDF to start.</div>
+ <div style="font-size:13px;color:#d9c3a0;margin-top:8px">Chapters (tap one to read just that chapter)</div>
+ <div id="chapters" style="display:block"></div>
+ <div class="row"><select id="voice"></select></div>
+ <div class="row"><label style="font-size:13px">Speed<select id="rate"><option value="0.7">0.7x slow</option><option value="0.8">0.8x</option><option value="0.85" selected>0.85x calm</option><option value="1">1x</option><option value="1.2">1.2x</option></select></label>
+ <label style="font-size:13px">Volume<select id="vol"><option value="0.3">Very quiet</option><option value="0.5" selected>Quiet</option><option value="0.75">Medium</option><option value="1">Full</option></select></label></div>
  <div id="text"></div>
  <details><summary>Add a chapter (book) to the shelf</summary>
   <div class="row"><input id="cname" placeholder="Name"><input id="cstart" type="number" placeholder="Start pg"><input id="cend" type="number" placeholder="End pg"></div>
   <div class="row"><button class="btn" id="addc">Add book</button><button class="btn alt" id="clearc">Clear shelf</button></div>
  </details>
- <details><summary>Chapter list</summary><div id="chapters" style="display:block"></div></details>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
@@ -40,6 +44,7 @@ details summary{cursor:pointer;color:#d9c3a0;font-size:14px;margin-top:8px}
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 const $=id=>document.getElementById(id);
+function say(t){$("status").textContent=t;const p=$("pstat");if(p)p.textContent=t}
 let pdf=null,key="",chapters=[],cur=-1,sentences=[],si=0,stopped=true,worker=null,cache={},runId=0;
 
 // ---------- 3D library ----------
@@ -88,44 +93,54 @@ let t0=0;(function loop(t){requestAnimationFrame(loop);const dt=(t-t0)/1000;t0=t
  lamp.intensity=1.25+Math.sin(t/900)*0.05;renderer.render(scene,camera)})(0);
 
 // ---------- reading logic ----------
-function save(){if(key)localStorage.setItem("ra:"+key,JSON.stringify({chapters,cur,si}))}
-function drawCh(){$("chapters").innerHTML="";chapters.forEach((c,i)=>{const b=document.createElement("button");b.className="btn alt";b.textContent=(i==cur?"▶ ":"")+c.name+" (pp "+c.s+"-"+c.e+")";b.onclick=()=>selectChapter(i);$("chapters").appendChild(b)});
+function autoChapters(n,name){
+ if(n==254)return[
+  {name:"Part One: The Seventh Day",s:9,e:68},{name:"Florence's Prayer",s:71,e:101},{name:"Gabriel's Prayer",s:102,e:172},
+  {name:"Elizabeth's Prayer",s:173,e:218},{name:"Part Three: Threshing-Floor",s:221,e:n}];
+ const size=n<=30?Math.max(3,Math.ceil(n/3)):20,out=[];for(let a=1,k=1;a<=n;a+=size,k++)out.push({name:"Part "+k+" (pp "+a+"-"+Math.min(n,a+size-1)+")",s:a,e:Math.min(n,a+size-1)});return out}
+function save(){if(key)localStorage.setItem("ra2:"+key,JSON.stringify({chapters,cur,si}))}
+function drawCh(){$("chapters").innerHTML="";chapters.forEach((c,i)=>{const b=document.createElement("button");b.className="btn alt";b.textContent=(i==cur?"▶ ":"")+c.name+(/\(pp/.test(c.name)?"":" (pp "+c.s+"-"+c.e+")");b.onclick=()=>selectChapter(i);$("chapters").appendChild(b)});
  buildBooks();$("now").textContent=cur>=0&&chapters[cur]?"📖 "+chapters[cur].name:"No book open"}
-function selectChapter(i){cur=i;si=0;save();drawCh();start()}
-function voices(){const v=speechSynthesis.getVoices();$("voice").innerHTML=v.map((x,i)=>`<option value="${i}">${x.name}</option>`).join("")}
+function unlock(){try{const u=new SpeechSynthesisUtterance(" ");u.volume=0;speechSynthesis.speak(u)}catch(_){}}
+function selectChapter(i){unlock();cur=i;si=0;save();drawCh();say("Getting "+chapters[i].name+" ready. Scanned pages take a few seconds each…");start()}
+function voices(){const v=speechSynthesis.getVoices();if(!v.length)return;$("voice").innerHTML=v.map((x,i)=>`<option value="${i}">${x.name}</option>`).join("");
+ const saved=localStorage.getItem("ra2:voice");if(saved&&v[saved]){$("voice").value=saved;return}
+ const score=x=>(/^en/i.test(x.lang)?10:0)+(/en-(GB|US)/i.test(x.lang)?2:0)+(/female|samantha|serena|libby|sonia|aria|jenny|natural|neural|soft/i.test(x.name)?5:0)+(x.localService?1:0);
+ let best=0;v.forEach((x,i)=>{if(score(x)>score(v[best]))best=i});$("voice").value=best}
+$("voice")&&($("voice").onchange=()=>localStorage.setItem("ra2:voice",$("voice").value));
 speechSynthesis.onvoiceschanged=voices;voices();
-$("file").onchange=async e=>{const f=e.target.files[0];if(!f)return;key=f.name+f.size;cache={};$("status").textContent="Opening…";
+$("file").onchange=async e=>{const f=e.target.files[0];if(!f)return;key=f.name+f.size;cache={};say("Opening…");
  pdf=await pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise;
- const st=JSON.parse(localStorage.getItem("ra:"+key)||"null");
+ const st=JSON.parse(localStorage.getItem("ra2:"+key)||"null");
  if(st){chapters=st.chapters;cur=st.cur;si=st.si}else{chapters=[];cur=-1;si=0;
   try{const o=await pdf.getOutline();if(o)for(const it of o){if(!it.dest)continue;const d=typeof it.dest=="string"?await pdf.getDestination(it.dest):it.dest;const p=await pdf.getPageIndex(d[0])+1;chapters.push({name:it.title,s:p,e:p})}
    for(let i=0;i<chapters.length;i++)chapters[i].e=i<chapters.length-1?Math.max(chapters[i].s,chapters[i+1].s-1):pdf.numPages}catch(_){}
-  if(!chapters.length)chapters=[{name:"Whole book",s:1,e:pdf.numPages}]}
- $("status").textContent=f.name+" · "+pdf.numPages+" pages. Add chapters below, then tap a book.";drawCh()};
+  if(!chapters.length)chapters=autoChapters(pdf.numPages,f.name)}
+ say(f.name+" · "+pdf.numPages+" pages. Tap a book (or a chapter below) to read it.");drawCh()};
 $("addc").onclick=()=>{const s=+$("cstart").value,e=+$("cend").value;if(!pdf||!s||!e||e<s||e>pdf.numPages)return alert("Open a PDF and enter a valid start and end page.");
- chapters=chapters.filter(c=>c.name!="Whole book");chapters.push({name:$("cname").value||"Chapter "+(chapters.length+1),s,e});chapters.sort((a,b)=>a.s-b.s);cur=-1;save();drawCh();
+ chapters.push({name:$("cname").value||"Chapter "+(chapters.length+1),s,e});chapters.sort((a,b)=>a.s-b.s);cur=-1;save();drawCh();
  $("cname").value="";$("cstart").value="";$("cend").value=""};
-$("clearc").onclick=()=>{if(!pdf)return;stopAll();chapters=[{name:"Whole book",s:1,e:pdf.numPages}];cur=-1;save();drawCh()};
+$("clearc").onclick=()=>{if(!pdf)return;stopAll();chapters=[];cur=-1;save();drawCh()};
 async function pageText(n){if(cache[n])return cache[n];const pg=await pdf.getPage(n);
  const tc=await pg.getTextContent();let t=tc.items.map(i=>i.str).join(" ").trim();
- if(t.length<20){if(!worker){$("status").textContent="Loading text reader (first time only)…";worker=await Tesseract.createWorker("eng")}
+ if(t.length<20){if(!worker){say("Loading text reader (first time only)…");try{worker=await Tesseract.createWorker("eng",1,{logger:m=>{if(m.progress!=null&&m.status&&!/recogniz/.test(m.status))say("Loading text reader: "+m.status+" "+Math.round(m.progress*100)+"%")}})}catch(err){say("Could not load the text reader. Check your connection and tap the book again.");worker=null;throw err}}
   const vp=pg.getViewport({scale:2});const c=document.createElement("canvas");c.width=vp.width;c.height=vp.height;await pg.render({canvasContext:c.getContext("2d"),viewport:vp}).promise;
   t=(await worker.recognize(c)).data.text}
  t=t.replace(/-\n(\w)/g,"$1").replace(/\s+/g," ").trim();return cache[n]=t}
 const split=s=>(s.match(/[^.!?]+[.!?]*/g)||[]).map(x=>x.trim()).filter(Boolean);
 let loading=false,waiting=false;
 async function start(){if(cur<0)return alert("Tap a book first.");stopAll();stopped=false;const my=++runId,c=chapters[cur];sentences=[];loading=true;
- for(let p=c.s;p<=c.e;p++){if(my!=runId)return;$("status").textContent="Reading page "+p+" of "+c.s+"–"+c.e+"…";
+ for(let p=c.s;p<=c.e;p++){if(my!=runId)return;say("Reading page "+p+" of "+c.s+"–"+c.e+"…");
   const add=split(await pageText(p));if(my!=runId)return;sentences.push(...add);
   if(waiting||!speechSynthesis.speaking){waiting=false;speak(my)}}
- loading=false;$("status").textContent=c.name+" loaded.";if(waiting){waiting=false;speak(my)}}
+ loading=false;say(c.name+" loaded.");if(waiting){waiting=false;speak(my)}}
 function show(){$("text").innerHTML=sentences.map((s,i)=>i==si?`<span class="cur" id="cs">${s}</span>`:s).join(" ");const e=$("cs");if(e)e.scrollIntoView({block:"center"})}
 function speak(my){if(stopped||my!=runId)return;
- if(si>=sentences.length){if(loading){waiting=true;return}$("status").textContent="Chapter finished.";si=0;save();return}
- show();const u=new SpeechSynthesisUtterance(sentences[si]);const v=speechSynthesis.getVoices()[$("voice").value];if(v)u.voice=v;u.rate=+$("rate").value;
- u.onend=()=>{if(my!=runId||stopped)return;si++;save();speak(my)};speechSynthesis.speak(u)}
+ if(si>=sentences.length){if(loading){waiting=true;return}say("Chapter finished.");si=0;save();return}
+ show();const u=new SpeechSynthesisUtterance(sentences[si]);const v=speechSynthesis.getVoices()[$("voice").value];if(v){try{u.voice=v;u.lang=v.lang}catch(_){}}u.rate=+$("rate").value;u.pitch=0.9;u.volume=+$("vol").value;
+ u.onend=()=>{if(my!=runId||stopped)return;si++;save();setTimeout(()=>speak(my),450)};u.onerror=e=>{if(e.error!="interrupted"&&e.error!="canceled")say("Voice error: "+e.error+". Tap Play again.")};speechSynthesis.speak(u)}
 function stopAll(){stopped=true;runId++;waiting=false;speechSynthesis.cancel()}
-$("play").onclick=()=>{if(speechSynthesis.paused){speechSynthesis.resume();return}start()};
+$("play").onclick=()=>{unlock();if(speechSynthesis.paused){speechSynthesis.resume();return}start()};
 $("pause").onclick=()=>speechSynthesis.pause();
 $("stop").onclick=stopAll;
 $("next").onclick=()=>{if(cur<chapters.length-1)selectChapter(cur+1)};
