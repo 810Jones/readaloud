@@ -1,0 +1,133 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Read Aloud Library</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;font-family:Georgia,serif;background:#1b120c;color:#f3e9d8}
+#scene{position:fixed;inset:0}
+#top{position:fixed;top:0;left:0;right:0;padding:10px 14px;background:linear-gradient(#1b120ccc,#1b120c00);display:flex;gap:8px;align-items:center}
+#top h1{font-size:18px;margin:0;flex:1;letter-spacing:1px}
+.btn{background:#7a4b2a;color:#f3e9d8;border:1px solid #a8754a;border-radius:10px;padding:10px 12px;font-size:15px;font-family:inherit}
+.btn.alt{background:#3a2618}
+#file{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}
+#top{z-index:10}#panel{z-index:10}#status{z-index:10;pointer-events:none}
+label.btn{display:inline-block;cursor:pointer}
+#status{position:fixed;top:56px;left:14px;right:14px;font-size:13px;color:#d9c3a0;text-shadow:0 1px 2px #000}
+#panel{position:fixed;left:0;right:0;bottom:0;background:#2a1b11f2;border-top:2px solid #a8754a;padding:10px 12px 14px;max-height:52vh;overflow:auto;border-radius:16px 16px 0 0}
+#panel h2{margin:0 0 6px;font-size:16px;color:#ffd9a0}
+.row{display:flex;gap:6px;margin-top:6px}.row>*{flex:1}
+input,select{font-size:15px;padding:9px;border-radius:8px;border:1px solid #a8754a;background:#1b120c;color:#f3e9d8;width:100%;box-sizing:border-box;font-family:inherit}
+#text{margin-top:8px;background:#f3e9d8;color:#2a1b11;border-radius:8px;padding:10px;line-height:1.55;max-height:22vh;overflow:auto;font-size:15px}
+.cur{background:#ffd36b}
+#chapters{display:none;margin-top:6px}#chapters button{display:block;width:100%;margin-top:4px;text-align:left}
+details summary{cursor:pointer;color:#d9c3a0;font-size:14px;margin-top:8px}
+</style></head><body>
+<canvas id="scene"></canvas>
+<div id="top"><h1>📚 Read Aloud Library</h1><label class="btn" id="pick" for="file">Open PDF<input type="file" id="file" accept="application/pdf,.pdf"></label></div>
+<div id="status">Open a PDF, add chapters, then tap a book on the shelf.</div>
+<div id="panel">
+ <h2 id="now">No book open</h2>
+ <div class="row"><button class="btn alt" id="prev">◀</button><button class="btn" id="play">▶ Play</button><button class="btn alt" id="pause">❚❚</button><button class="btn alt" id="stop">■</button><button class="btn alt" id="next">▶▶</button></div>
+ <div class="row"><select id="voice"></select><select id="rate"><option value="0.8">0.8x</option><option value="1" selected>1x</option><option value="1.2">1.2x</option><option value="1.5">1.5x</option></select></div>
+ <div id="text"></div>
+ <details><summary>Add a chapter (book) to the shelf</summary>
+  <div class="row"><input id="cname" placeholder="Name"><input id="cstart" type="number" placeholder="Start pg"><input id="cend" type="number" placeholder="End pg"></div>
+  <div class="row"><button class="btn" id="addc">Add book</button><button class="btn alt" id="clearc">Clear shelf</button></div>
+ </details>
+ <details><summary>Chapter list</summary><div id="chapters" style="display:block"></div></details>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.min.js"></script>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+const $=id=>document.getElementById(id);
+let pdf=null,key="",chapters=[],cur=-1,sentences=[],si=0,stopped=true,worker=null,cache={},runId=0;
+
+// ---------- 3D library ----------
+const canvas=$("scene"),renderer=new THREE.WebGLRenderer({canvas,antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.shadowMap.enabled=true;
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x1b120c);scene.fog=new THREE.Fog(0x1b120c,8,18);
+const camera=new THREE.PerspectiveCamera(50,1,0.1,50);
+scene.add(new THREE.HemisphereLight(0xffe2b8,0x2a1b11,0.7));
+const lamp=new THREE.PointLight(0xffc27a,1.3,14);lamp.position.set(0,3,4);lamp.castShadow=true;scene.add(lamp);
+const wood=new THREE.MeshStandardMaterial({color:0x6b4226,roughness:0.8});
+const dark=new THREE.MeshStandardMaterial({color:0x3a2416,roughness:0.9});
+const floor=new THREE.Mesh(new THREE.PlaneGeometry(30,30),new THREE.MeshStandardMaterial({color:0x2b1a10}));floor.rotation.x=-Math.PI/2;floor.position.y=-2.2;floor.receiveShadow=true;scene.add(floor);
+const SHELF_W=3.4,ROWS=4,ROW_H=1.05;
+const shelf=new THREE.Group();scene.add(shelf);
+{const back=new THREE.Mesh(new THREE.BoxGeometry(SHELF_W+0.3,ROWS*ROW_H+0.3,0.1),dark);back.position.set(0,0.15,-0.45);shelf.add(back)}
+[-1,1].forEach(s=>{const m=new THREE.Mesh(new THREE.BoxGeometry(0.15,ROWS*ROW_H+0.3,0.9),wood);m.position.set(s*(SHELF_W/2+0.075),0.15,0);m.castShadow=true;shelf.add(m)});
+for(let r=0;r<=ROWS;r++){const m=new THREE.Mesh(new THREE.BoxGeometry(SHELF_W+0.3,0.08,0.9),wood);m.position.set(0,rowY(r)-0.04,0);m.receiveShadow=true;shelf.add(m)}
+function rowY(r){return -2+r*ROW_H}
+const colors=[0x8c2f2f,0x2f5e8c,0x3e7a46,0x8c6d2f,0x5e2f8c,0x2f7a7a,0x7a3e5e,0x4a4a6e];
+let books=[];
+function spineTex(name,col,active){const c=document.createElement("canvas");c.width=128;c.height=512;const g=c.getContext("2d");
+ g.fillStyle="#"+col.toString(16).padStart(6,"0");g.fillRect(0,0,128,512);
+ g.fillStyle="#e8c27a";g.fillRect(0,30,128,8);g.fillRect(0,474,128,8);
+ if(active){g.strokeStyle="#ffd36b";g.lineWidth=10;g.strokeRect(5,5,118,502)}
+ g.save();g.translate(64,256);g.rotate(-Math.PI/2);g.fillStyle="#f3e9d8";g.font="bold 40px Georgia";g.textAlign="center";g.textBaseline="middle";
+ let t=name.length>16?name.slice(0,15)+"…":name;g.fillText(t,0,0);g.restore();
+ const tx=new THREE.CanvasTexture(c);return tx}
+function buildBooks(){books.forEach(b=>shelf.remove(b));books=[];
+ let x=-SHELF_W/2+0.12,row=ROWS-1;
+ chapters.forEach((c,i)=>{const pages=c.e-c.s+1,w=Math.min(0.5,0.18+pages*0.012),h=0.7+((i*37)%20)/100,col=colors[i%colors.length];
+  if(x+w>SHELF_W/2-0.05){x=-SHELF_W/2+0.12;row--} if(row<0)row=0;
+  const side=new THREE.MeshStandardMaterial({color:col,roughness:0.6}),pagesM=new THREE.MeshStandardMaterial({color:0xefe3c8});
+  const front=new THREE.MeshStandardMaterial({map:spineTex(c.name,col,i==cur),roughness:0.6});
+  const b=new THREE.Mesh(new THREE.BoxGeometry(w,h,0.62),[side,side,pagesM,pagesM,front,side]);
+  b.position.set(x+w/2,rowY(row)+h/2,0.05);b.castShadow=true;b.userData={i,baseZ:0.05,baseY:b.position.y};shelf.add(b);books.push(b);x+=w+0.02});}
+function layout(){const w=innerWidth,h=innerHeight;renderer.setSize(w,h,false);camera.aspect=w/h;
+ const fitW=(SHELF_W+0.6)/(2*Math.tan(THREE.MathUtils.degToRad(25))*camera.aspect),fitH=(ROWS*ROW_H+1)/(2*Math.tan(THREE.MathUtils.degToRad(25)));
+ camera.position.set(0,0.9,Math.max(fitW,fitH)+0.6);camera.lookAt(0,0.6,0);camera.setViewOffset(w,h,0,h*0.2,w,h);camera.updateProjectionMatrix()}
+addEventListener("resize",layout);layout();
+const ray=new THREE.Raycaster(),pt=new THREE.Vector2();
+canvas.addEventListener("pointerup",e=>{pt.set(e.clientX/innerWidth*2-1,-(e.clientY/innerHeight)*2+1);ray.setFromCamera(pt,camera);
+ const hit=ray.intersectObjects(books)[0];if(hit)selectChapter(hit.object.userData.i)});
+let t0=0;(function loop(t){requestAnimationFrame(loop);const dt=(t-t0)/1000;t0=t;
+ books.forEach(b=>{const on=b.userData.i==cur,tz=on?0.45:b.userData.baseZ,ty=b.userData.baseY+(on?0.08:0);
+  b.position.z+=(tz-b.position.z)*Math.min(1,dt*6);b.position.y+=(ty-b.position.y)*Math.min(1,dt*6);b.rotation.y=on?Math.sin(t/600)*0.08:0});
+ lamp.intensity=1.25+Math.sin(t/900)*0.05;renderer.render(scene,camera)})(0);
+
+// ---------- reading logic ----------
+function save(){if(key)localStorage.setItem("ra:"+key,JSON.stringify({chapters,cur,si}))}
+function drawCh(){$("chapters").innerHTML="";chapters.forEach((c,i)=>{const b=document.createElement("button");b.className="btn alt";b.textContent=(i==cur?"▶ ":"")+c.name+" (pp "+c.s+"-"+c.e+")";b.onclick=()=>selectChapter(i);$("chapters").appendChild(b)});
+ buildBooks();$("now").textContent=cur>=0&&chapters[cur]?"📖 "+chapters[cur].name:"No book open"}
+function selectChapter(i){cur=i;si=0;save();drawCh();start()}
+function voices(){const v=speechSynthesis.getVoices();$("voice").innerHTML=v.map((x,i)=>`<option value="${i}">${x.name}</option>`).join("")}
+speechSynthesis.onvoiceschanged=voices;voices();
+$("file").onchange=async e=>{const f=e.target.files[0];if(!f)return;key=f.name+f.size;cache={};$("status").textContent="Opening…";
+ pdf=await pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise;
+ const st=JSON.parse(localStorage.getItem("ra:"+key)||"null");
+ if(st){chapters=st.chapters;cur=st.cur;si=st.si}else{chapters=[];cur=-1;si=0;
+  try{const o=await pdf.getOutline();if(o)for(const it of o){if(!it.dest)continue;const d=typeof it.dest=="string"?await pdf.getDestination(it.dest):it.dest;const p=await pdf.getPageIndex(d[0])+1;chapters.push({name:it.title,s:p,e:p})}
+   for(let i=0;i<chapters.length;i++)chapters[i].e=i<chapters.length-1?Math.max(chapters[i].s,chapters[i+1].s-1):pdf.numPages}catch(_){}
+  if(!chapters.length)chapters=[{name:"Whole book",s:1,e:pdf.numPages}]}
+ $("status").textContent=f.name+" · "+pdf.numPages+" pages. Add chapters below, then tap a book.";drawCh()};
+$("addc").onclick=()=>{const s=+$("cstart").value,e=+$("cend").value;if(!pdf||!s||!e||e<s||e>pdf.numPages)return alert("Open a PDF and enter a valid start and end page.");
+ chapters=chapters.filter(c=>c.name!="Whole book");chapters.push({name:$("cname").value||"Chapter "+(chapters.length+1),s,e});chapters.sort((a,b)=>a.s-b.s);cur=-1;save();drawCh();
+ $("cname").value="";$("cstart").value="";$("cend").value=""};
+$("clearc").onclick=()=>{if(!pdf)return;stopAll();chapters=[{name:"Whole book",s:1,e:pdf.numPages}];cur=-1;save();drawCh()};
+async function pageText(n){if(cache[n])return cache[n];const pg=await pdf.getPage(n);
+ const tc=await pg.getTextContent();let t=tc.items.map(i=>i.str).join(" ").trim();
+ if(t.length<20){if(!worker){$("status").textContent="Loading text reader (first time only)…";worker=await Tesseract.createWorker("eng")}
+  const vp=pg.getViewport({scale:2});const c=document.createElement("canvas");c.width=vp.width;c.height=vp.height;await pg.render({canvasContext:c.getContext("2d"),viewport:vp}).promise;
+  t=(await worker.recognize(c)).data.text}
+ t=t.replace(/-\n(\w)/g,"$1").replace(/\s+/g," ").trim();return cache[n]=t}
+const split=s=>(s.match(/[^.!?]+[.!?]*/g)||[]).map(x=>x.trim()).filter(Boolean);
+let loading=false,waiting=false;
+async function start(){if(cur<0)return alert("Tap a book first.");stopAll();stopped=false;const my=++runId,c=chapters[cur];sentences=[];loading=true;
+ for(let p=c.s;p<=c.e;p++){if(my!=runId)return;$("status").textContent="Reading page "+p+" of "+c.s+"–"+c.e+"…";
+  const add=split(await pageText(p));if(my!=runId)return;sentences.push(...add);
+  if(waiting||!speechSynthesis.speaking){waiting=false;speak(my)}}
+ loading=false;$("status").textContent=c.name+" loaded.";if(waiting){waiting=false;speak(my)}}
+function show(){$("text").innerHTML=sentences.map((s,i)=>i==si?`<span class="cur" id="cs">${s}</span>`:s).join(" ");const e=$("cs");if(e)e.scrollIntoView({block:"center"})}
+function speak(my){if(stopped||my!=runId)return;
+ if(si>=sentences.length){if(loading){waiting=true;return}$("status").textContent="Chapter finished.";si=0;save();return}
+ show();const u=new SpeechSynthesisUtterance(sentences[si]);const v=speechSynthesis.getVoices()[$("voice").value];if(v)u.voice=v;u.rate=+$("rate").value;
+ u.onend=()=>{if(my!=runId||stopped)return;si++;save();speak(my)};speechSynthesis.speak(u)}
+function stopAll(){stopped=true;runId++;waiting=false;speechSynthesis.cancel()}
+$("play").onclick=()=>{if(speechSynthesis.paused){speechSynthesis.resume();return}start()};
+$("pause").onclick=()=>speechSynthesis.pause();
+$("stop").onclick=stopAll;
+$("next").onclick=()=>{if(cur<chapters.length-1)selectChapter(cur+1)};
+$("prev").onclick=()=>{if(cur>0)selectChapter(cur-1)};
+</script></body></html>
